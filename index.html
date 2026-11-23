@@ -1,0 +1,1785 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>L'ARCHIVE - 香水スペック図鑑</title>
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- React & ReactDOM CDN -->
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <!-- Babel Standalone -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=Cinzel:wght@400;600;700&family=Noto+Serif+JP:wght@300;400;600&family=Noto+Sans+JP:wght@300;400;500;700&display=swap');
+    body {
+      font-family: 'Noto Sans JP', sans-serif;
+    }
+    .font-serif-brand {
+      font-family: 'Cinzel', 'Noto Serif JP', serif;
+    }
+    .scrollbar-none::-webkit-scrollbar {
+      display: none;
+    }
+    .scrollbar-none {
+      -ms-overflow-style: none;
+      scrollbar-width: none;
+    }
+    @keyframes pulse-subtle {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.4; }
+    }
+    .animate-pulse-subtle {
+      animation: pulse-subtle 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+    }
+  </style>
+</head>
+<body class="bg-white text-stone-900 antialiased selection:bg-stone-200">
+  <div id="root"></div>
+
+  <script>
+    // 先行スタブ定義（初期化タイミングの衝突防止）
+    window.AppStorage = {
+      isCloud: () => false,
+      subscribe: () => () => {},
+      saveAll: async () => {},
+      saveItem: async () => {},
+      deleteItem: async () => {}
+    };
+  </script>
+
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+    import { getAuth, signInAnonymously, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+    import { getFirestore, doc, setDoc, deleteDoc, onSnapshot, collection } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+    const appId = typeof __app_id !== 'undefined' ? __app_id : 'scentvault-default';
+    let db = null;
+    let auth = null;
+    let isCloudReady = false;
+
+    // ブラウザIndexedDB永続化
+    const DB_NAME = 'ScentVaultPermanentDB';
+    const STORE_NAME = 'perfumes';
+
+    const openIDB = () => {
+      return new Promise((resolve) => {
+        if (!window.indexedDB) return resolve(null);
+        const req = indexedDB.open(DB_NAME, 3);
+        req.onupgradeneeded = (e) => {
+          const database = e.target.result;
+          if (!database.objectStoreNames.contains(STORE_NAME)) {
+            database.createObjectStore(STORE_NAME, { keyPath: 'id' });
+          }
+        };
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => resolve(null);
+      });
+    };
+
+    // クラウドストレージ初期化
+    if (typeof __firebase_config !== 'undefined') {
+      try {
+        const firebaseConfig = JSON.parse(__firebase_config);
+        const app = initializeApp(firebaseConfig);
+        auth = getAuth(app);
+        db = getFirestore(app);
+
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+          await signInWithCustomToken(auth, __initial_auth_token);
+        } else {
+          await signInAnonymously(auth);
+        }
+        isCloudReady = true;
+      } catch (e) {
+        console.warn('[Storage] Cloud fallback to local:', e);
+      }
+    }
+
+    window.AppStorage = {
+      isCloud: () => isCloudReady,
+
+      subscribe: (onDataReceived) => {
+        let isHandled = false;
+        let unsubscribeCloud = () => {};
+
+        // IndexedDBから高速復元
+        openIDB().then(idb => {
+          if (!idb) return;
+          const tx = idb.transaction(STORE_NAME, 'readonly');
+          const store = tx.objectStore(STORE_NAME);
+          const req = store.getAll();
+          req.onsuccess = () => {
+            if (Array.isArray(req.result) && req.result.length > 0 && !isHandled) {
+              onDataReceived(req.result, 'browser');
+            }
+          };
+        });
+
+        // クラウド同期
+        if (isCloudReady && db) {
+          const colRef = collection(db, 'artifacts', appId, 'public', 'data', 'perfumes');
+          unsubscribeCloud = onSnapshot(colRef, (snapshot) => {
+            if (!snapshot.empty) {
+              isHandled = true;
+              const list = [];
+              snapshot.forEach((docSnap) => {
+                list.push(docSnap.data());
+              });
+              onDataReceived(list, 'cloud');
+
+              openIDB().then(idb => {
+                if (!idb) return;
+                const tx = idb.transaction(STORE_NAME, 'readwrite');
+                const store = tx.objectStore(STORE_NAME);
+                store.clear();
+                list.forEach(item => store.put(item));
+              });
+            }
+          }, (err) => {
+            console.warn('[Storage] Snapshot error:', err);
+          });
+        }
+
+        return () => {
+          unsubscribeCloud();
+        };
+      },
+
+      saveItem: async (item) => {
+        try {
+          const idb = await openIDB();
+          if (idb) {
+            const tx = idb.transaction(STORE_NAME, 'readwrite');
+            tx.objectStore(STORE_NAME).put(item);
+          }
+        } catch (err) {
+          console.warn('IDB item save error', err);
+        }
+
+        if (isCloudReady && db && auth?.currentUser) {
+          try {
+            const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'perfumes', item.id);
+            await setDoc(docRef, item, { merge: true });
+          } catch (e) {
+            console.warn('Cloud save error:', e);
+          }
+        }
+      },
+
+      deleteItem: async (id) => {
+        try {
+          const idb = await openIDB();
+          if (idb) {
+            const tx = idb.transaction(STORE_NAME, 'readwrite');
+            tx.objectStore(STORE_NAME).delete(id);
+          }
+        } catch (e) {
+          console.warn('IDB delete error', err);
+        }
+
+        if (isCloudReady && db && auth?.currentUser) {
+          try {
+            const docRef = doc(db, 'artifacts', appId, 'public', 'data', 'perfumes', id);
+            await deleteDoc(docRef);
+          } catch (e) {
+            console.warn('Cloud delete error:', e);
+          }
+        }
+      }
+    };
+
+    window.dispatchEvent(new CustomEvent('storage-ready'));
+  </script>
+
+  <script type="text/babel">
+    const { useState, useMemo, useRef, useEffect } = React;
+
+    // 画像自動圧縮処理
+    const compressImage = (file, maxWidth = 750, quality = 0.72) => {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.readAsDataURL(file);
+        reader.onload = (event) => {
+          const img = new Image();
+          img.src = event.target.result;
+          img.onload = () => {
+            const canvas = document.createElement('canvas');
+            let { width, height } = img;
+            if (width > maxWidth || height > maxWidth) {
+              if (width > height) {
+                height = Math.round((height * maxWidth) / width);
+                width = maxWidth;
+              } else {
+                width = Math.round((width * maxWidth) / height);
+                height = maxWidth;
+              }
+            }
+            canvas.width = width;
+            canvas.height = height;
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(img, 0, 0, width, height);
+            resolve(canvas.toDataURL('image/jpeg', quality));
+          };
+          img.onerror = () => reject(new Error('画像の読み込みに失敗しました'));
+        };
+        reader.onerror = () => reject(new Error('ファイルの読み込みに失敗しました'));
+      });
+    };
+
+    const IconPlus = ({ className = "w-4 h-4" }) => (
+      <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4v16m8-8H4"/></svg>
+    );
+    const IconSearch = ({ className = "w-4 h-4" }) => (
+      <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
+    );
+    const IconX = ({ className = "w-4 h-4" }) => (
+      <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"/></svg>
+    );
+    const IconDroplets = ({ className = "w-4 h-4" }) => (
+      <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 2.69l5.66 5.66a8 8 0 11-11.31 0z"/></svg>
+    );
+    const IconStar = ({ className = "w-4 h-4", fill = "currentColor" }) => (
+      <svg className={className} fill={fill} stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M11.049 2.927c.3-.921 1.603-.921 1.902 0l1.519 4.674a1 1 0 00.95.69h4.915c.969 0 1.371 1.24.588 1.81l-3.976 2.888a1 1 0 00-.363 1.118l1.518 4.674c.3.922-.755 1.688-1.538 1.118l-3.976-2.888a1 1 0 00-1.176 0l-3.976 2.888c-.783.57-1.838-.197-1.538-1.118l1.518-4.674a1 1 0 00-.363-1.118l-3.976-2.888c-.784-.57-.38-1.81.588-1.81h4.914a1 1 0 00.951-.69l1.519-4.674z"/></svg>
+    );
+    const IconEdit = ({ className = "w-4 h-4" }) => (
+      <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
+    );
+    const IconTrash = ({ className = "w-4 h-4" }) => (
+      <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+    );
+    const IconArrowLeft = ({ className = "w-4 h-4" }) => (
+      <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 19l-7-7m0 0l7-7m-7 7h18"/></svg>
+    );
+    const IconCopy = ({ className = "w-4 h-4" }) => (
+      <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 16H6a2 2 0 01-2-2V6a2 2 0 012-2h8a2 2 0 012 2v2m-6 12h8a2 2 0 002-2v-8a2 2 0 00-2-2h-8a2 2 0 00-2 2v8a2 2 0 002 2z"/></svg>
+    );
+    const IconUpload = ({ className = "w-4 h-4" }) => (
+      <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-8l-4-4m0 0L8 8m4-4v12"/></svg>
+    );
+    const IconCheckCircle = ({ className = "w-4 h-4" }) => (
+      <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+    );
+    const IconMove3d = ({ className = "w-4 h-4" }) => (
+      <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4"/></svg>
+    );
+    const IconRotateCcw = ({ className = "w-4 h-4" }) => (
+      <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+    );
+    const IconPlay = ({ className = "w-3.5 h-3.5" }) => (
+      <svg className={className} fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+    );
+    const IconPause = ({ className = "w-3.5 h-3.5" }) => (
+      <svg className={className} fill="currentColor" viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
+    );
+    const IconCloudCheck = ({ className = "w-3.5 h-3.5" }) => (
+      <svg className={className} fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 15a4 4 0 004 4h9a5 5 0 10-.1-9.999 5.002 5.002 0 00-9.78 2.096A4.001 4.001 0 003 15z"/><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 13l2 2 4-4"/></svg>
+    );
+
+    const CONCENTRATIONS = [
+      { id: 'EDC', label: 'Eau de Cologne', short: 'EDC' },
+      { id: 'EDT', label: 'Eau de Toilette', short: 'EDT' },
+      { id: 'EDP', label: 'Eau de Parfum', short: 'EDP' },
+      { id: 'Parfum', label: 'Extrait / Parfum', short: 'Parfum' },
+    ];
+
+    const PRESET_FAMILIES = [
+      'Woody', 'Citrus', 'Floral', 'Oriental / Amber', 'Gourmand', 
+      'Fougère', 'Chypre', 'Aquatic / Fresh', 'Aromatic / Green', 'Leather'
+    ];
+
+    const PRESET_BRANDS = [
+      'Diptyque', 'Le Labo', 'Maison Margiela', 'Byredo', 'Jo Malone London', 
+      'Tom Ford', 'Aesop', 'Chanel', 'Dior', 'Hermès', 'Guerlain', 'Creed', 
+      'Frédéric Malle', 'Santa Maria Novella', 'Officine Universelle Buly', 
+      'Kilian', 'Penhaligon\'s', 'Maison Francis Kurkdjian', 'L\'Artisan Parfumeur', 
+      'Nishane', 'Acqua di Parma', 'SHIRO', 'AUX PARADIS'
+    ];
+
+    const SEASONS = [
+      { id: 'spring', label: '春' },
+      { id: 'summer', label: '夏' },
+      { id: 'autumn', label: '秋' },
+      { id: 'winter', label: '冬' },
+    ];
+
+    const DEFAULT_PERFUMES = [
+      {
+        id: '1',
+        name: 'Tam Dao',
+        brand: 'Diptyque',
+        concentration: 'EDP',
+        perfumer: 'Daniel Moliere',
+        releaseYear: 2013,
+        mainFamily: 'Woody',
+        rating: 5,
+        bottleSize: 75,
+        remainingAmount: 60,
+        price: '28,270',
+        image: 'https://images.unsplash.com/photo-1594035910387-fea47794261f?w=800&auto=format&fit=crop&q=80',
+        pyramid: {
+          top: ['イタリアンサイプレス', 'マートル', 'ローズウッド'],
+          middle: ['サンダルウッド（白檀）', 'シダーウッド'],
+          base: ['ブラジリアンローズウッド', 'スパイス', 'アンバー', 'ホワイトムスク']
+        },
+        accords: ['ウッディ', 'アロマティック', 'パウダリー', '温かみのあるスパイシー'],
+        metrics: { heaviness: 3.2, sweetness: 2.0, uniqueness: 4.2 },
+        dayNight: 'both',
+        seasons: ['autumn', 'winter', 'spring'],
+        description: 'ゴアのビャクダンの記憶。東洋の寺院や熱帯の原生林を思わせる、静謐でクリーミーな極上のサンダルウッド。肌に乗せると温かみのある神聖な香りが広がります。',
+        memo: '湿度の高い日につけると落ち着いたお香のような品格が出る。秋の夜の読書や特別な外出に最適。'
+      },
+      {
+        id: '2',
+        name: 'By the Fireplace',
+        brand: 'Maison Margiela',
+        concentration: 'EDT',
+        perfumer: 'Marie Salamagne',
+        releaseYear: 2015,
+        mainFamily: 'Gourmand',
+        rating: 4.5,
+        bottleSize: 100,
+        remainingAmount: 85,
+        price: '23,540',
+        image: 'https://images.unsplash.com/photo-1547887537-6158d64c35b3?w=800&auto=format&fit=crop&q=80',
+        pyramid: {
+          top: ['クローブ', 'ピンクペッパー', 'オレンジフラワー'],
+          middle: ['チェスナット（焼き栗）', 'ガイアックウッド', 'ジュニパー'],
+          base: ['バニラ', 'ペルーバルサム', 'カシュメラン']
+        },
+        accords: ['スモーキー', 'ウッディ', 'バニラ', 'ウォームスパイシー'],
+        metrics: { heaviness: 4.5, sweetness: 4.3, uniqueness: 4.0 },
+        dayNight: 'night',
+        seasons: ['autumn', 'winter'],
+        description: '真冬のシャモニー、1971年。暖炉でパチパチと爆ぜる薪の煙と、香ばしくローストされた栗の甘い温もりを再現。',
+        memo: 'トップのスモーキーさから、ミドル以降の甘く香ばしいマロンバニラへの変化がドラマチック。冬の外出時に重宝。'
+      },
+      {
+        id: '3',
+        name: 'Santal 33',
+        brand: 'Le Labo',
+        concentration: 'EDP',
+        perfumer: 'Frank Voelkl',
+        releaseYear: 2011,
+        mainFamily: 'Woody',
+        rating: 5,
+        bottleSize: 50,
+        remainingAmount: 40,
+        price: '29,700',
+        image: 'https://images.unsplash.com/photo-1523293182086-7651a899d37f?w=800&auto=format&fit=crop&q=80',
+        pyramid: {
+          top: ['バイオレットアコード', 'カルダモン'],
+          middle: ['アイリス', 'パピルス', 'アンブロックス'],
+          base: ['シダーウッド', 'レザー', 'サンダルウッド']
+        },
+        accords: ['レザー', 'ウッディ', 'パウダリー', 'スモーキー'],
+        metrics: { heaviness: 3.5, sweetness: 1.2, uniqueness: 4.8 },
+        dayNight: 'both',
+        seasons: ['spring', 'autumn', 'winter'],
+        description: 'アメリカ西部の広大な荒野、焚き火の煙と使い込まれた革の鞍、乾いた砂漠の風を象徴するアイコニックな調香。',
+        memo: '圧倒的な拡散力と残り香の良さ。1プッシュで十分終日香る。レザージャケットとの相性抜群。'
+      },
+      {
+        id: '4',
+        name: 'Gypsy Water',
+        brand: 'Byredo',
+        concentration: 'EDP',
+        perfumer: 'Jérôme Epinette',
+        releaseYear: 2008,
+        mainFamily: 'Woody',
+        rating: 4.5,
+        bottleSize: 100,
+        remainingAmount: 70,
+        price: '38,170',
+        image: 'https://images.unsplash.com/photo-1592945403244-b3fbafd7f539?w=800&auto=format&fit=crop&q=80',
+        pyramid: {
+          top: ['ベルガモット', 'レモン', 'ペッパー', 'ジュニパーベリー'],
+          middle: ['インセンス', 'パインニードル（松葉）', 'オリス'],
+          base: ['アンバー', 'バニラ', 'サンダルウッド']
+        },
+        accords: ['ウッディ', 'アロマティック', 'シトラス', 'パウダリー'],
+        metrics: { heaviness: 2.0, sweetness: 2.4, uniqueness: 2.8 },
+        dayNight: 'both',
+        seasons: ['spring', 'summer', 'autumn'],
+        description: 'ロマの生活様式、大自然の中で過ごす自由な夜。土や松林の新鮮な息吹と、焚き火の温もりを捉えた軽やかなウッディ。',
+        memo: '爽やかな柑橘から優しいバニラとインセンスへ。肌馴染みが良くデイリー使いしやすい。'
+      }
+    ];
+
+    function Scent3DViewer({ metrics, perfumeName }) {
+      const canvasRef = useRef(null);
+      const [rotation, setRotation] = useState({ x: 0.35, y: -0.55 });
+      const [isDragging, setIsDragging] = useState(false);
+      const [autoRotate, setAutoRotate] = useState(true);
+      const lastPos = useRef({ x: 0, y: 0 });
+
+      useEffect(() => {
+        const canvas = canvasRef.current;
+        if (!canvas) return;
+        const ctx = canvas.getContext('2d');
+        let frameId;
+
+        const render = () => {
+          const width = canvas.clientWidth;
+          const height = canvas.clientHeight;
+          if (canvas.width !== width * 2 || canvas.height !== height * 2) {
+            canvas.width = width * 2;
+            canvas.height = height * 2;
+          }
+
+          ctx.save();
+          ctx.scale(2, 2);
+          ctx.clearRect(0, 0, width, height);
+
+          const centerX = width / 2;
+          const centerY = height / 2;
+          const cubeSize = 95;
+          const fov = 380;
+
+          const project = (x, y, z) => {
+            let x1 = x * Math.cos(rotation.y) + z * Math.sin(rotation.y);
+            let y1 = y;
+            let z1 = -x * Math.sin(rotation.y) + z * Math.cos(rotation.y);
+
+            let x2 = x1;
+            let y2 = y1 * Math.cos(rotation.x) - z1 * Math.sin(rotation.x);
+            let z2 = y1 * Math.sin(rotation.x) + z1 * Math.cos(rotation.x);
+
+            const scale = fov / (fov + z2 + 350);
+            return { x: centerX + x2 * scale, y: centerY + y2 * scale, z: z2 };
+          };
+
+          const vertices = [
+            [-cubeSize, -cubeSize, -cubeSize], [cubeSize, -cubeSize, -cubeSize],
+            [cubeSize, cubeSize, -cubeSize], [-cubeSize, cubeSize, -cubeSize],
+            [-cubeSize, -cubeSize, cubeSize], [cubeSize, -cubeSize, cubeSize],
+            [cubeSize, cubeSize, cubeSize], [-cubeSize, cubeSize, cubeSize],
+          ].map(v => project(v[0], v[1], v[2]));
+
+          const edges = [
+            [0,1], [1,2], [2,3], [3,0], [4,5], [5,6], [6,7], [7,4],
+            [0,4], [1,5], [2,6], [3,7]
+          ];
+
+          ctx.strokeStyle = '#e7e5e4';
+          ctx.lineWidth = 1;
+          edges.forEach(([start, end]) => {
+            ctx.beginPath();
+            ctx.moveTo(vertices[start].x, vertices[start].y);
+            ctx.lineTo(vertices[end].x, vertices[end].y);
+            ctx.stroke();
+          });
+
+          // 軸線
+          const axisLen = cubeSize * 1.3;
+          ctx.beginPath(); ctx.strokeStyle = '#a8a29e'; ctx.setLineDash([2, 3]);
+          ctx.moveTo(project(-axisLen, 0, 0).x, project(-axisLen, 0, 0).y);
+          ctx.lineTo(project(axisLen, 0, 0).x, project(axisLen, 0, 0).y); ctx.stroke();
+
+          ctx.beginPath(); ctx.strokeStyle = '#d97706';
+          ctx.moveTo(project(0, axisLen, 0).x, project(0, axisLen, 0).y);
+          ctx.lineTo(project(0, -axisLen, 0).x, project(0, -axisLen, 0).y); ctx.stroke();
+
+          ctx.beginPath(); ctx.strokeStyle = '#4f46e5';
+          ctx.moveTo(project(0, 0, -axisLen).x, project(0, 0, -axisLen).y);
+          ctx.lineTo(project(0, 0, axisLen).x, project(0, 0, axisLen).y); ctx.stroke();
+          ctx.setLineDash([]);
+
+          // 座標点
+          const normX = (((metrics.heaviness || 3) - 3) / 2) * cubeSize;
+          const normY = -(((metrics.sweetness || 3) - 3) / 2) * cubeSize;
+          const normZ = (((metrics.uniqueness || 3) - 3) / 2) * cubeSize;
+          const pPos = project(normX, normY, normZ);
+
+          const glow = ctx.createRadialGradient(pPos.x, pPos.y, 1, pPos.x, pPos.y, 16);
+          glow.addColorStop(0, 'rgba(217, 119, 6, 1)');
+          glow.addColorStop(0.5, 'rgba(217, 119, 6, 0.4)');
+          glow.addColorStop(1, 'rgba(217, 119, 6, 0)');
+
+          ctx.beginPath(); ctx.arc(pPos.x, pPos.y, 16, 0, Math.PI * 2);
+          ctx.fillStyle = glow; ctx.fill();
+
+          ctx.beginPath(); ctx.arc(pPos.x, pPos.y, 4, 0, Math.PI * 2);
+          ctx.fillStyle = '#ffffff'; ctx.fill();
+
+          if (perfumeName) {
+            ctx.font = 'bold 11px sans-serif'; ctx.fillStyle = '#1c1917';
+            ctx.fillText(perfumeName, pPos.x + 8, pPos.y - 8);
+          }
+
+          ctx.restore();
+
+          if (autoRotate && !isDragging) {
+            setRotation(prev => ({ x: prev.x, y: prev.y + 0.005 }));
+          }
+        };
+
+        frameId = requestAnimationFrame(render);
+        return () => cancelAnimationFrame(frameId);
+      }, [rotation, metrics, isDragging, autoRotate, perfumeName]);
+
+      const handlePointerDown = (e) => {
+        setIsDragging(true);
+        lastPos.current = { x: e.clientX, y: e.clientY };
+        e.target.setPointerCapture(e.pointerId);
+      };
+
+      const handlePointerMove = (e) => {
+        if (!isDragging) return;
+        const dx = e.clientX - lastPos.current.x;
+        const dy = e.clientY - lastPos.current.y;
+        setRotation(prev => ({
+          x: Math.max(-1.4, Math.min(1.4, prev.x + dy * 0.01)),
+          y: prev.y + dx * 0.01
+        }));
+        lastPos.current = { x: e.clientX, y: e.clientY };
+      };
+
+      const handlePointerUp = (e) => {
+        setIsDragging(false);
+        try { e.target.releasePointerCapture(e.pointerId); } catch (_) {}
+      };
+
+      return (
+        <div className="relative w-full max-w-[340px] aspect-square bg-white border border-stone-200 select-none shadow-xs">
+          <canvas
+            ref={canvasRef}
+            className="w-full h-full cursor-grab active:cursor-grabbing touch-none"
+            onPointerDown={handlePointerDown}
+            onPointerMove={handlePointerMove}
+            onPointerUp={handlePointerUp}
+            onPointerCancel={handlePointerUp}
+          />
+          <div className="absolute top-2 right-2 flex items-center gap-1 bg-white/90 border border-stone-200 p-1">
+            <button
+              onClick={() => setAutoRotate(!autoRotate)}
+              className={`p-1 text-xs ${autoRotate ? 'text-amber-700 font-bold' : 'text-stone-500 hover:text-stone-800'}`}
+              title={autoRotate ? '自動回転を停止' : '自動回転を開始'}
+            >
+              {autoRotate ? <IconPause className="w-3.5 h-3.5" /> : <IconPlay className="w-3.5 h-3.5" />}
+            </button>
+            <button
+              onClick={() => setRotation({ x: 0.35, y: -0.55 })}
+              className="p-1 text-stone-600 hover:text-stone-900"
+              title="視点をリセット"
+            >
+              <IconRotateCcw className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </div>
+      );
+    }
+
+    function App() {
+      const [perfumes, setPerfumes] = useState(DEFAULT_PERFUMES);
+      const [viewMode, setViewMode] = useState('catalog');
+      const [selectedPerfumeId, setSelectedPerfumeId] = useState(null);
+      const [searchQuery, setSearchQuery] = useState('');
+      const [selectedFamily, setSelectedFamily] = useState('All');
+      const [selectedBrandFilter, setSelectedBrandFilter] = useState('All');
+      const [sortBy, setSortBy] = useState('featured');
+      const [detailTab, setDetailTab] = useState('pyramid');
+      const [isFormOpen, setIsFormOpen] = useState(false);
+      const [editingPerfume, setEditingPerfume] = useState(null);
+      const [notification, setNotification] = useState('');
+      const [storageStatus, setStorageStatus] = useState('自動保存中');
+
+      // 初回起動時のデータ同期
+      useEffect(() => {
+        const initSync = () => {
+          if (window.AppStorage && typeof window.AppStorage.subscribe === 'function') {
+            const unsub = window.AppStorage.subscribe((latestItems, source) => {
+              if (Array.isArray(latestItems) && latestItems.length > 0) {
+                setPerfumes(latestItems);
+                setStorageStatus(source === 'cloud' ? 'クラウド同期中' : 'ブラウザ自動保存中');
+              }
+            });
+            setStorageStatus(window.AppStorage.isCloud() ? 'クラウド自動保存' : 'ブラウザ自動保存');
+            return unsub;
+          }
+        };
+
+        const timer = setTimeout(initSync, 80);
+        window.addEventListener('storage-ready', initSync);
+        return () => {
+          clearTimeout(timer);
+          window.removeEventListener('storage-ready', initSync);
+        };
+      }, []);
+
+      const showToast = (msg) => {
+        setNotification(msg);
+        setTimeout(() => setNotification(''), 3000);
+      };
+
+      // ブランドとファミリーの動的収集
+      const allAvailableBrands = useMemo(() => {
+        const existing = perfumes.map(p => p.brand).filter(Boolean);
+        return Array.from(new Set([...PRESET_BRANDS, ...existing])).sort((a, b) => a.localeCompare(b));
+      }, [perfumes]);
+
+      const allAvailableFamilies = useMemo(() => {
+        const existing = perfumes.map(p => p.mainFamily).filter(Boolean);
+        return Array.from(new Set([...PRESET_FAMILIES, ...existing])).sort((a, b) => a.localeCompare(b));
+      }, [perfumes]);
+
+      const selectedPerfume = useMemo(() => {
+        return perfumes.find(p => p.id === selectedPerfumeId) || perfumes[0] || null;
+      }, [perfumes, selectedPerfumeId]);
+
+      const filteredPerfumes = useMemo(() => {
+        return perfumes.filter(p => {
+          const q = searchQuery.toLowerCase().trim();
+          const matchQuery = !q ||
+            (p.name && p.name.toLowerCase().includes(q)) ||
+            (p.brand && p.brand.toLowerCase().includes(q)) ||
+            (p.perfumer && p.perfumer.toLowerCase().includes(q)) ||
+            (p.pyramid?.top && p.pyramid.top.some(n => n.toLowerCase().includes(q))) ||
+            (p.pyramid?.middle && p.pyramid.middle.some(n => n.toLowerCase().includes(q))) ||
+            (p.pyramid?.base && p.pyramid.base.some(n => n.toLowerCase().includes(q))) ||
+            (p.accords && p.accords.some(a => a.toLowerCase().includes(q)));
+
+          const matchFamily = selectedFamily === 'All' || p.mainFamily === selectedFamily;
+          const matchBrand = selectedBrandFilter === 'All' || p.brand === selectedBrandFilter;
+          return matchQuery && matchFamily && matchBrand;
+        }).sort((a, b) => {
+          if (sortBy === 'rating') return (b.rating || 0) - (a.rating || 0);
+          if (sortBy === 'name') return (a.name || '').localeCompare(b.name || '');
+          return 0;
+        });
+      }, [perfumes, searchQuery, selectedFamily, selectedBrandFilter, sortBy]);
+
+      const handleOpenDetail = (id) => {
+        setSelectedPerfumeId(id);
+        setViewMode('detail');
+        setDetailTab('pyramid');
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      };
+
+      const handleSavePerfume = async (perfumeData) => {
+        let updatedList;
+        if (editingPerfume && editingPerfume.id) {
+          updatedList = perfumes.map(p => p.id === perfumeData.id ? perfumeData : p);
+          showToast(`「${perfumeData.name}」の変更を自動保存しました`);
+        } else {
+          const newEntry = { ...perfumeData, id: Date.now().toString() };
+          updatedList = [newEntry, ...perfumes];
+          setSelectedPerfumeId(newEntry.id);
+          setViewMode('detail');
+          showToast(`新しい香水「${newEntry.name}」を登録しました`);
+        }
+        setPerfumes(updatedList);
+        setIsFormOpen(false);
+        setEditingPerfume(null);
+
+        if (window.AppStorage && typeof window.AppStorage.saveItem === 'function') {
+          await window.AppStorage.saveItem(editingPerfume?.id ? perfumeData : updatedList[0]);
+        }
+      };
+
+      const handleDeletePerfume = async (id) => {
+        const target = perfumes.find(p => p.id === id);
+        if (!target) return;
+        const updatedList = perfumes.filter(p => p.id !== id);
+        setPerfumes(updatedList);
+        showToast(`「${target.name}」を削除しました`);
+        if (viewMode === 'detail') setViewMode('catalog');
+
+        if (window.AppStorage && typeof window.AppStorage.deleteItem === 'function') {
+          await window.AppStorage.deleteItem(id);
+        }
+      };
+
+      const handleDuplicatePerfume = (perfume) => {
+        const duplicated = {
+          ...perfume,
+          id: null,
+          name: `${perfume.name} (コピー)`
+        };
+        setEditingPerfume(duplicated);
+        setIsFormOpen(true);
+      };
+
+      return (
+        <div className="min-h-screen bg-white flex flex-col">
+          {notification && (
+            <div className="fixed bottom-6 right-6 z-50 bg-stone-900 text-white text-xs px-4 py-3 shadow-xl flex items-center gap-2">
+              <IconCheckCircle className="w-4 h-4 text-emerald-400" />
+              <span>{notification}</span>
+            </div>
+          )}
+
+          {}
+          <header className="border-b border-stone-200 sticky top-0 z-40 bg-white/95 backdrop-blur-md">
+            <div className="bg-stone-900 text-stone-300 text-[11px] py-1.5 px-4 text-center tracking-widest uppercase font-light flex items-center justify-center gap-3">
+              <span className="flex items-center gap-1.5 text-emerald-400 font-mono">
+                <IconCloudCheck className="w-3.5 h-3.5" />
+                <span>{storageStatus}：常に最新</span>
+              </span>
+              <span className="text-stone-600">|</span>
+              <span className="text-amber-300 font-mono">{perfumes.length} Fragrances</span>
+            </div>
+
+            <div className="max-w-7xl mx-auto px-4 sm:px-8 py-4 flex items-center justify-between">
+              <div onClick={() => setViewMode('catalog')} className="cursor-pointer">
+                <h1 className="font-serif-brand text-2xl tracking-[0.2em] font-medium text-stone-900 uppercase">
+                  L'ARCHIVE
+                </h1>
+                <p className="text-[10px] tracking-widest text-stone-600 uppercase font-mono">
+                  Haute Parfumerie & Notes
+                </p>
+              </div>
+
+              <div className="flex items-center gap-4">
+                <button
+                  onClick={() => { setEditingPerfume(null); setIsFormOpen(true); }}
+                  className="flex items-center gap-2 px-4 py-2 bg-stone-900 text-white hover:bg-stone-800 text-xs tracking-widest uppercase font-medium transition-colors shadow-sm"
+                >
+                  <IconPlus className="w-3.5 h-3.5" />
+                  <span>香水を登録</span>
+                </button>
+              </div>
+            </div>
+          </header>
+
+          {}
+          {viewMode === 'catalog' ? (
+            <main className="max-w-7xl mx-auto px-4 sm:px-8 py-10 space-y-8 flex-1 w-full">
+              <section className="text-center max-w-2xl mx-auto space-y-2">
+                <span className="text-[11px] font-mono tracking-[0.3em] uppercase text-stone-600 block">
+                  Curated Fragrance Library
+                </span>
+                <h2 className="text-3xl font-serif-brand tracking-wide text-stone-900 font-light">
+                  調香と記憶のアーカイブ
+                </h2>
+                <p className="text-xs text-stone-500 font-light">
+                  登録・変更した内容は自動保存され、次回開き直した際も常に最新状態で維持されます。
+                </p>
+              </section>
+
+              {/* 検索・絞り込みバー */}
+              <div className="border-y border-stone-200 py-4 flex flex-col md:flex-row md:items-center justify-between gap-4">
+                <div className="flex items-center gap-2 overflow-x-auto pb-2 md:pb-0 scrollbar-none text-xs">
+                  {['All', ...allAvailableFamilies].map(fam => {
+                    const count = fam === 'All' ? perfumes.length : perfumes.filter(p => p.mainFamily === fam).length;
+                    if (fam !== 'All' && count === 0) return null;
+                    return (
+                      <button
+                        key={fam}
+                        onClick={() => setSelectedFamily(fam)}
+                        className={`px-3.5 py-1.5 rounded-full whitespace-nowrap text-xs transition-all ${
+                          selectedFamily === fam ? 'bg-stone-900 text-white font-medium' : 'text-stone-600 hover:text-stone-900 hover:bg-stone-100'
+                        }`}
+                      >
+                        {fam} ({count})
+                      </button>
+                    );
+                  })}
+                </div>
+
+                <div className="flex flex-wrap items-center gap-3">
+                  <div className="relative flex-1 sm:w-56 min-w-[160px]">
+                    <IconSearch className="w-3.5 h-3.5 text-stone-500 absolute left-3 top-2.5" />
+                    <input
+                      type="text"
+                      value={searchQuery}
+                      onChange={(e) => setSearchQuery(e.target.value)}
+                      placeholder="香水名, ブランド, ノート..."
+                      className="w-full pl-8 pr-7 py-1.5 bg-stone-50 border border-stone-200 text-xs text-stone-800 placeholder-stone-500 focus:outline-none focus:border-stone-900 focus:bg-white"
+                    />
+                    {searchQuery && (
+                      <button onClick={() => setSearchQuery('')} className="absolute right-2 top-2 text-stone-500">
+                        <IconX className="w-3.5 h-3.5" />
+                      </button>
+                    )}
+                  </div>
+
+                  <select
+                    value={selectedBrandFilter}
+                    onChange={(e) => setSelectedBrandFilter(e.target.value)}
+                    className="px-3 py-1.5 bg-stone-50 border border-stone-200 text-xs text-stone-800 focus:outline-none focus:border-stone-900"
+                  >
+                    <option value="All">すべてのブランド ({perfumes.length})</option>
+                    {allAvailableBrands.map(b => {
+                      const count = perfumes.filter(p => p.brand === b).length;
+                      if (count === 0) return null;
+                      return <option key={b} value={b}>{b} ({count})</option>;
+                    })}
+                  </select>
+
+                  <select
+                    value={sortBy}
+                    onChange={(e) => setSortBy(e.target.value)}
+                    className="px-3 py-1.5 bg-stone-50 border border-stone-200 text-xs text-stone-700 focus:outline-none focus:border-stone-900"
+                  >
+                    <option value="featured">おすすめ順</option>
+                    <option value="rating">★ 評価順</option>
+                    <option value="name">名前順</option>
+                  </select>
+                </div>
+              </div>
+
+              {/* グリッドカード */}
+              {filteredPerfumes.length === 0 ? (
+                <div className="py-20 text-center text-stone-500 space-y-3">
+                  <IconDroplets className="w-10 h-10 mx-auto opacity-30" />
+                  <p className="text-sm">一致する香水がありません。</p>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-x-8 gap-y-12">
+                  {filteredPerfumes.map(perfume => (
+                    <div 
+                      key={perfume.id}
+                      onClick={() => handleOpenDetail(perfume.id)}
+                      className="group cursor-pointer flex flex-col space-y-3"
+                    >
+                      <div className="aspect-[4/5] bg-stone-100 relative overflow-hidden border border-stone-200 flex items-center justify-center transition-all group-hover:border-stone-400 group-hover:shadow-md">
+                        {perfume.image ? (
+                          <img 
+                            src={perfume.image} 
+                            alt={perfume.name}
+                            className="w-full h-full object-cover transition-transform duration-500 group-hover:scale-105"
+                            onError={(e) => { e.target.style.display = 'none'; }}
+                          />
+                        ) : (
+                          <div className="flex flex-col items-center text-stone-500">
+                            <IconDroplets className="w-10 h-10 stroke-1 mb-2 text-stone-400" />
+                            <span className="text-[10px] uppercase font-mono">No Image</span>
+                          </div>
+                        )}
+
+                        <span className="absolute top-3 left-3 text-[10px] font-mono tracking-wider px-2 py-0.5 bg-white/90 text-stone-900 border border-stone-200">
+                          {perfume.concentration}
+                        </span>
+
+                        <div className="absolute inset-x-3 bottom-3 opacity-0 group-hover:opacity-100 transition-all duration-300">
+                          <div className="w-full py-2 bg-white/95 text-stone-900 text-xs font-medium tracking-wider uppercase text-center border border-stone-200 shadow-sm flex items-center justify-center gap-1.5">
+                            <IconMove3d className="w-3.5 h-3.5" /> スペックを見る
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="space-y-1">
+                        <p className="text-[11px] uppercase font-mono tracking-widest text-stone-500">
+                          {perfume.brand}
+                        </p>
+                        <h3 className="font-serif-brand text-lg text-stone-900 group-hover:text-stone-600 transition-colors font-medium truncate">
+                          {perfume.name}
+                        </h3>
+                        <p className="text-xs text-stone-500 line-clamp-1 font-light">
+                          {(perfume.pyramid?.top || []).slice(0, 2).concat((perfume.pyramid?.middle || []).slice(0, 1)).join(' · ')}
+                        </p>
+                        <div className="pt-2 flex items-center justify-between text-xs text-stone-500 border-t border-stone-100">
+                          <span className="text-stone-700 font-mono">
+                            {perfume.price ? `¥${perfume.price}` : `${perfume.bottleSize || 50}ml`}
+                          </span>
+                          <div className="flex items-center gap-1 text-amber-500 font-semibold">
+                            <IconStar className="w-3 h-3 fill-amber-400 text-amber-400" />
+                            <span>{perfume.rating}</span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </main>
+          ) : (
+            <main className="max-w-7xl mx-auto px-4 sm:px-8 py-8 space-y-12 flex-1 w-full">
+              <div className="flex items-center justify-between border-b border-stone-200 pb-4">
+                <button
+                  onClick={() => setViewMode('catalog')}
+                  className="flex items-center gap-2 text-xs font-medium tracking-widest uppercase text-stone-600 hover:text-stone-900"
+                >
+                  <IconArrowLeft className="w-4 h-4" /> コレクション一覧に戻る
+                </button>
+
+                <div className="flex items-center gap-3">
+                  <button
+                    onClick={() => handleDuplicatePerfume(selectedPerfume)}
+                    className="flex items-center gap-1.5 text-xs text-stone-600 hover:text-stone-900 px-3 py-1.5 border border-stone-300 hover:border-stone-900"
+                  >
+                    <IconCopy className="w-3.5 h-3.5" /> 複製して登録
+                  </button>
+                  <button
+                    onClick={() => { setEditingPerfume(selectedPerfume); setIsFormOpen(true); }}
+                    className="flex items-center gap-1.5 text-xs text-stone-600 hover:text-stone-900 px-3 py-1.5 border border-stone-300 hover:border-stone-900"
+                  >
+                    <IconEdit className="w-3.5 h-3.5" /> 編集
+                  </button>
+                  <button
+                    onClick={() => handleDeletePerfume(selectedPerfume.id)}
+                    className="flex items-center gap-1.5 text-xs text-stone-600 hover:text-rose-700 px-3 py-1.5 border border-stone-300 hover:border-rose-300"
+                  >
+                    <IconTrash className="w-3.5 h-3.5" /> 削除
+                  </button>
+                </div>
+              </div>
+
+              {/* 写真 ＆ スペック概要 */}
+              <section className="grid grid-cols-1 lg:grid-cols-12 gap-12 items-start">
+                <div className="lg:col-span-6 space-y-4">
+                  <div className="aspect-[4/5] bg-stone-100 border border-stone-200 overflow-hidden relative flex items-center justify-center">
+                    {selectedPerfume.image ? (
+                      <img src={selectedPerfume.image} alt={selectedPerfume.name} className="w-full h-full object-cover" />
+                    ) : (
+                      <IconDroplets className="w-16 h-16 stroke-1 text-stone-300" />
+                    )}
+                    <button
+                      onClick={() => { setEditingPerfume(selectedPerfume); setIsFormOpen(true); }}
+                      className="absolute bottom-4 right-4 bg-white/90 hover:bg-white text-stone-900 text-xs px-3 py-2 border border-stone-300 shadow-sm flex items-center gap-1.5"
+                    >
+                      <IconUpload className="w-3.5 h-3.5" /> 写真を変更
+                    </button>
+                  </div>
+
+                  <div className="p-4 bg-stone-50 border border-stone-200 space-y-2">
+                    <div className="flex justify-between text-xs font-mono">
+                      <span className="text-stone-500 uppercase">Bottle Capacity</span>
+                      <span className="font-medium text-stone-900">{selectedPerfume.remainingAmount || 0}ml / {selectedPerfume.bottleSize || 50}ml 残り</span>
+                    </div>
+                    <div className="h-1.5 bg-stone-200 overflow-hidden rounded-full">
+                      <div 
+                        className="h-full bg-stone-900"
+                        style={{ width: `${Math.min(100, ((selectedPerfume.remainingAmount || 0) / (selectedPerfume.bottleSize || 50)) * 100)}%` }}
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                <div className="lg:col-span-6 space-y-6">
+                  <div className="space-y-2 border-b border-stone-200 pb-6">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-mono uppercase tracking-[0.25em] text-stone-500">
+                        {selectedPerfume.brand}
+                      </span>
+                      <div className="flex items-center gap-1 text-amber-500 font-semibold text-sm">
+                        <IconStar className="w-4 h-4 fill-amber-400 text-amber-400" />
+                        <span>{selectedPerfume.rating} / 5.0</span>
+                      </div>
+                    </div>
+
+                    <h2 className="font-serif-brand text-3xl sm:text-4xl text-stone-900 font-medium tracking-wide">
+                      {selectedPerfume.name}
+                    </h2>
+
+                    <p className="text-xs text-stone-500 font-mono">
+                      {selectedPerfume.releaseYear ? `${selectedPerfume.releaseYear}年調香` : ''} 
+                      {selectedPerfume.perfumer ? ` • 調香師: ${selectedPerfume.perfumer}` : ''}
+                    </p>
+
+                    {selectedPerfume.price && (
+                      <p className="text-xl font-mono text-stone-900 pt-2">
+                        ¥{selectedPerfume.price} <span className="text-xs text-stone-500 font-sans">({selectedPerfume.bottleSize || 50}ml)</span>
+                      </p>
+                    )}
+                  </div>
+
+                  <div className="space-y-2">
+                    <h4 className="text-xs font-mono uppercase tracking-widest text-stone-500">Olfactory Description</h4>
+                    <p className="text-sm text-stone-700 leading-relaxed font-light">
+                      {selectedPerfume.description || 'ストーリーはまだ登録されていません。'}
+                    </p>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-px bg-stone-200 border border-stone-200 text-xs">
+                    <div className="bg-white p-3.5 space-y-1">
+                      <span className="text-stone-500 block text-[10px] uppercase font-mono">Concentration</span>
+                      <span className="font-medium text-stone-900">{selectedPerfume.concentration}</span>
+                    </div>
+                    <div className="bg-white p-3.5 space-y-1">
+                      <span className="text-stone-500 block text-[10px] uppercase font-mono">Family</span>
+                      <span className="font-medium text-stone-900">{selectedPerfume.mainFamily}</span>
+                    </div>
+                    <div className="bg-white p-3.5 space-y-1">
+                      <span className="text-stone-500 block text-[10px] uppercase font-mono">Best Season</span>
+                      <span className="font-medium text-stone-900">
+                        {(selectedPerfume.seasons || []).map(s => SEASONS.find(item => item.id === s)?.label).join(' · ') || '全季節'}
+                      </span>
+                    </div>
+                    <div className="bg-white p-3.5 space-y-1">
+                      <span className="text-stone-500 block text-[10px] uppercase font-mono">Time of Day</span>
+                      <span className="font-medium text-stone-900">
+                        {selectedPerfume.dayNight === 'day' ? 'デイタイム (昼)' : selectedPerfume.dayNight === 'night' ? 'ナイト (夜)' : 'オールデイ (終日)'}
+                      </span>
+                    </div>
+                  </div>
+
+                  {selectedPerfume.accords?.length > 0 && (
+                    <div className="space-y-2 pt-2">
+                      <span className="text-xs font-mono uppercase tracking-widest text-stone-500">Main Accords</span>
+                      <div className="flex flex-wrap gap-2">
+                        {selectedPerfume.accords.map((accord, idx) => (
+                          <span key={idx} className="px-3 py-1 bg-stone-100 text-stone-800 text-xs tracking-wider uppercase font-light border border-stone-200">
+                            {accord}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </section>
+
+              {}
+              <section className="pt-8 border-t border-stone-200 space-y-8">
+                <div className="flex border-b border-stone-200 gap-8 justify-center">
+                  <button
+                    onClick={() => setDetailTab('pyramid')}
+                    className={`pb-4 text-xs font-medium tracking-[0.2em] uppercase transition-all relative ${
+                      detailTab === 'pyramid' ? 'text-stone-900 font-bold after:absolute after:bottom-0 after:left-0 after:right-0 after:h-0.5 after:bg-stone-900' : 'text-stone-500 hover:text-stone-900'
+                    }`}
+                  >
+                    1. 調香ピラミッド
+                  </button>
+                  <button
+                    onClick={() => setDetailTab('metrics3d')}
+                    className={`pb-4 text-xs font-medium tracking-[0.2em] uppercase transition-all relative flex items-center gap-1.5 ${
+                      detailTab === 'metrics3d' ? 'text-stone-900 font-bold after:absolute after:bottom-0 after:left-0 after:right-0 after:h-0.5 after:bg-stone-900' : 'text-stone-500 hover:text-stone-900'
+                    }`}
+                  >
+                    <IconMove3d className="w-3.5 h-3.5" />
+                    <span>2. 3D特性マトリクス</span>
+                  </button>
+                  <button
+                    onClick={() => setDetailTab('memo')}
+                    className={`pb-4 text-xs font-medium tracking-[0.2em] uppercase transition-all relative ${
+                      detailTab === 'memo' ? 'text-stone-900 font-bold after:absolute after:bottom-0 after:left-0 after:right-0 after:h-0.5 after:bg-stone-900' : 'text-stone-500 hover:text-stone-900'
+                    }`}
+                  >
+                    3. テイスティングメモ
+                  </button>
+                </div>
+
+                {/* ピラミッドタブ */}
+                {detailTab === 'pyramid' && (
+                  <div className="max-w-4xl mx-auto space-y-8">
+                    <div className="text-center space-y-1">
+                      <h3 className="font-serif-brand text-2xl text-stone-900 font-light">調香ピラミッド</h3>
+                      <p className="text-xs text-stone-500 font-mono uppercase tracking-widest">Olfactory Pyramid Structure</p>
+                    </div>
+
+                    <div className="flex flex-col items-center gap-4 py-8 px-4 bg-stone-50 border border-stone-200">
+                      <div className="flex flex-col items-center">
+                        <span className="w-2.5 h-2.5 bg-amber-500 rotate-45 mb-1"></span>
+                        <span className="text-[10px] font-mono tracking-widest text-amber-900 uppercase font-semibold">Peak</span>
+                      </div>
+
+                      {/* Top Notes */}
+                      <div className="w-full max-w-sm mx-auto">
+                        <div className="bg-white border border-amber-300 p-5 shadow-xs flex flex-col items-center text-center space-y-2">
+                          <div className="inline-flex items-center px-3 py-0.5 bg-amber-50 text-amber-900 text-xs font-mono font-bold uppercase tracking-wider border border-amber-200">
+                            Top Notes / トップノート
+                          </div>
+                          <p className="text-[11px] text-stone-500">つけてから約15分（第一印象）</p>
+                          <div className="flex flex-wrap justify-center gap-2 pt-1">
+                            {(selectedPerfume.pyramid?.top || []).map((n, i) => (
+                              <span key={i} className="px-3.5 py-1 bg-amber-50/50 border border-amber-200 text-xs text-stone-800 font-medium">
+                                {n}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="w-px h-3 bg-stone-300"></div>
+
+                      {/* Middle Notes */}
+                      <div className="w-full max-w-xl mx-auto">
+                        <div className="bg-white border border-stone-300 p-6 shadow-xs flex flex-col items-center text-center space-y-2">
+                          <div className="inline-flex items-center px-3.5 py-0.5 bg-stone-100 text-stone-900 text-xs font-mono font-bold uppercase tracking-wider border border-stone-300">
+                            Heart & Middle Notes / ミドルノート
+                          </div>
+                          <p className="text-[11px] text-stone-500">30分から3時間（香りの主役・メインテーマ）</p>
+                          <div className="flex flex-wrap justify-center gap-2 pt-1">
+                            {(selectedPerfume.pyramid?.middle || []).map((n, i) => (
+                              <span key={i} className="px-4 py-1.5 bg-stone-50 border border-stone-300 text-xs text-stone-900 font-medium">
+                                {n}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="w-px h-3 bg-stone-300"></div>
+
+                      {/* Base Notes */}
+                      <div className="w-full max-w-3xl mx-auto">
+                        <div className="bg-white border-2 border-stone-900 p-7 shadow-xs flex flex-col items-center text-center space-y-2">
+                          <div className="inline-flex items-center px-4 py-0.5 bg-stone-900 text-white text-xs font-mono font-bold uppercase tracking-wider">
+                            Base & Last Notes / ラストノート
+                          </div>
+                          <p className="text-[11px] text-stone-500">3時間以降から終日（残り香・肌の余韻）</p>
+                          <div className="flex flex-wrap justify-center gap-2 pt-1">
+                            {(selectedPerfume.pyramid?.base || []).map((n, i) => (
+                              <span key={i} className="px-4 py-1.5 bg-stone-100 border border-stone-300 text-xs text-stone-900 font-medium">
+                                {n}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* 3Dマトリクスタブ */}
+                {detailTab === 'metrics3d' && (
+                  <div className="max-w-4xl mx-auto space-y-8">
+                    <div className="text-center space-y-1">
+                      <h3 className="font-serif-brand text-2xl text-stone-900 font-light">3Dフレグランス空間プロファイル</h3>
+                      <p className="text-xs text-stone-500 font-mono uppercase tracking-widest">[X: 重厚感] × [Y: 爽快・甘み] × [Z: 個性味]</p>
+                    </div>
+
+                    <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-center bg-stone-50 border border-stone-200 p-6 sm:p-8">
+                      <div className="lg:col-span-7 flex flex-col items-center">
+                        <Scent3DViewer metrics={selectedPerfume.metrics || { heaviness: 3, sweetness: 3, uniqueness: 3 }} perfumeName={selectedPerfume.name} />
+                        <p className="text-[11px] text-stone-500 font-mono mt-3 flex items-center gap-1.5">
+                          <IconMove3d className="w-3.5 h-3.5 text-stone-500" /> ドラッグまたはスワイプで360度回転可能
+                        </p>
+                      </div>
+
+                      <div className="lg:col-span-5 space-y-4">
+                        <div className="p-3.5 bg-white border border-stone-200 space-y-1.5">
+                          <div className="flex justify-between text-xs font-mono">
+                            <span className="text-stone-500 font-bold">X軸: 重厚感</span>
+                            <span className="font-bold text-stone-900">{selectedPerfume.metrics?.heaviness || 3.0} / 5.0</span>
+                          </div>
+                          <div className="h-1.5 bg-stone-100 overflow-hidden">
+                            <div className="h-full bg-stone-900" style={{ width: `${((selectedPerfume.metrics?.heaviness || 3) / 5) * 100}%` }} />
+                          </div>
+                          <div className="flex justify-between text-[10px] text-stone-500 font-light">
+                            <span>1.0 軽快</span><span>5.0 重厚</span>
+                          </div>
+                        </div>
+
+                        <div className="p-3.5 bg-white border border-stone-200 space-y-1.5">
+                          <div className="flex justify-between text-xs font-mono">
+                            <span className="text-stone-500 font-bold">Y軸: 爽やかさ ↔ 甘さ</span>
+                            <span className="font-bold text-stone-900">{selectedPerfume.metrics?.sweetness || 3.0} / 5.0</span>
+                          </div>
+                          <div className="h-1.5 bg-stone-100 overflow-hidden">
+                            <div className="h-full bg-amber-600" style={{ width: `${((selectedPerfume.metrics?.sweetness || 3) / 5) * 100}%` }} />
+                          </div>
+                          <div className="flex justify-between text-[10px] text-stone-500 font-light">
+                            <span>1.0 爽快</span><span>5.0 甘口</span>
+                          </div>
+                        </div>
+
+                        <div className="p-3.5 bg-white border border-stone-200 space-y-1.5">
+                          <div className="flex justify-between text-xs font-mono">
+                            <span className="text-stone-500 font-bold">Z軸: 個性味 ↔ 万人受け</span>
+                            <span className="font-bold text-stone-900">{selectedPerfume.metrics?.uniqueness || 3.0} / 5.0</span>
+                          </div>
+                          <div className="h-1.5 bg-stone-100 overflow-hidden">
+                            <div className="h-full bg-indigo-600" style={{ width: `${((selectedPerfume.metrics?.uniqueness || 3) / 5) * 100}%` }} />
+                          </div>
+                          <div className="flex justify-between text-[10px] text-stone-500 font-light">
+                            <span>1.0 万人受け</span><span>5.0 個性的</span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {/* メモタブ */}
+                {detailTab === 'memo' && (
+                  <div className="max-w-2xl mx-auto space-y-6">
+                    <div className="p-8 border border-stone-200 bg-stone-50 space-y-4">
+                      <h3 className="font-serif-brand text-lg text-stone-900">Personal Tasting Notes</h3>
+                      <p className="text-sm text-stone-800 leading-relaxed font-light whitespace-pre-wrap">
+                        {selectedPerfume.memo || 'メモはまだ登録されていません。「編集」から感想を記録できます。'}
+                      </p>
+                    </div>
+                  </div>
+                )}
+              </section>
+            </main>
+          )}
+
+          {}
+          {isFormOpen && (
+            <PerfumeFormModal
+              initialData={editingPerfume}
+              presetBrands={allAvailableBrands}
+              presetFamilies={allAvailableFamilies}
+              onSave={handleSavePerfume}
+              onClose={() => { setIsFormOpen(false); setEditingPerfume(null); }}
+            />
+          )}
+
+          <footer className="border-t border-stone-200 py-10 mt-16 text-center text-xs text-stone-500 font-light space-y-1">
+            <p className="font-serif-brand tracking-widest text-stone-800 uppercase">L'ARCHIVE PARFUMERIE</p>
+            <p className="font-mono text-[11px]">Private Fragrance Spec & Scent Registry</p>
+          </footer>
+        </div>
+      );
+    }
+
+    function PerfumeFormModal({ initialData, presetBrands, presetFamilies, onSave, onClose }) {
+      const [formTab, setFormTab] = useState('basic');
+      const [selectedBrandOption, setSelectedBrandOption] = useState(() => {
+        if (initialData?.brand) {
+          return presetBrands.includes(initialData.brand) ? initialData.brand : '__custom__';
+        }
+        return presetBrands[0] || 'Diptyque';
+      });
+      const [customBrandInput, setCustomBrandInput] = useState(() => {
+        if (initialData?.brand && !presetBrands.includes(initialData.brand)) return initialData.brand;
+        return '';
+      });
+
+      const [selectedFamilyOption, setSelectedFamilyOption] = useState(() => {
+        if (initialData?.mainFamily) {
+          return presetFamilies.includes(initialData.mainFamily) ? initialData.mainFamily : '__custom__';
+        }
+        return presetFamilies[0] || 'Woody';
+      });
+      const [customFamilyInput, setCustomFamilyInput] = useState(() => {
+        if (initialData?.mainFamily && !presetFamilies.includes(initialData.mainFamily)) return initialData.mainFamily;
+        return '';
+      });
+
+      const [formData, setFormData] = useState(() => {
+        if (initialData) {
+          return {
+            ...initialData,
+            image: initialData.image || '',
+            pyramid: {
+              top: initialData.pyramid?.top || ['ベルガモット'],
+              middle: initialData.pyramid?.middle || ['サンダルウッド'],
+              base: initialData.pyramid?.base || ['ムスク']
+            },
+            accords: initialData.accords || ['ウッディ'],
+            metrics: initialData.metrics || { heaviness: 3.0, sweetness: 3.0, uniqueness: 3.0 },
+            seasons: initialData.seasons || ['spring', 'autumn']
+          };
+        }
+        return {
+          name: '',
+          brand: presetBrands[0] || 'Diptyque',
+          concentration: 'EDP',
+          perfumer: '',
+          releaseYear: '',
+          mainFamily: presetFamilies[0] || 'Woody',
+          rating: 4,
+          bottleSize: 50,
+          remainingAmount: 50,
+          price: '',
+          image: '',
+          pyramid: { top: ['ベルガモット'], middle: ['サンダルウッド'], base: ['ムスク'] },
+          accords: ['ウッディ'],
+          metrics: { heaviness: 3.0, sweetness: 3.0, uniqueness: 3.0 },
+          dayNight: 'both',
+          seasons: ['spring', 'autumn'],
+          description: '',
+          memo: ''
+        };
+      });
+
+      const [tempTop, setTempTop] = useState('');
+      const [tempMid, setTempMid] = useState('');
+      const [tempBase, setTempBase] = useState('');
+      const [tempAccord, setTempAccord] = useState('');
+
+      const handleImageUpload = (e) => {
+        const file = e.target.files?.[0];
+        if (file) {
+          compressImage(file, 750, 0.72)
+            .then(compressedUrl => setFormData(prev => ({ ...prev, image: compressedUrl })))
+            .catch(() => {
+              const reader = new FileReader();
+              reader.onloadend = () => setFormData(prev => ({ ...prev, image: reader.result }));
+              reader.readAsDataURL(file);
+            });
+        }
+      };
+
+      const handleClearImage = () => {
+        setFormData(prev => ({ ...prev, image: '' }));
+      };
+
+      const addNote = (type, val, setter) => {
+        if (!val.trim()) return;
+        setFormData(prev => ({
+          ...prev,
+          pyramid: { ...prev.pyramid, [type]: [...(prev.pyramid[type] || []), val.trim()] }
+        }));
+        setter('');
+      };
+
+      const removeNote = (type, idx) => {
+        setFormData(prev => ({
+          ...prev,
+          pyramid: { ...prev.pyramid, [type]: prev.pyramid[type].filter((_, i) => i !== idx) }
+        }));
+      };
+
+      const addAccord = () => {
+        if (!tempAccord.trim()) return;
+        setFormData(prev => ({
+          ...prev,
+          accords: [...(prev.accords || []), tempAccord.trim()]
+        }));
+        setTempAccord('');
+      };
+
+      const removeAccord = (idx) => {
+        setFormData(prev => ({
+          ...prev,
+          accords: prev.accords.filter((_, i) => i !== idx)
+        }));
+      };
+
+      const toggleSeason = (sId) => {
+        const current = formData.seasons || [];
+        setFormData(prev => ({
+          ...prev,
+          seasons: current.includes(sId) ? current.filter(s => s !== sId) : [...current, sId]
+        }));
+      };
+
+      const handleSubmit = (e) => {
+        e.preventDefault();
+        const finalBrand = selectedBrandOption === '__custom__' ? customBrandInput.trim() : selectedBrandOption;
+        const finalFamily = selectedFamilyOption === '__custom__' ? customFamilyInput.trim() : selectedFamilyOption;
+        if (!formData.name.trim()) return;
+        if (!finalBrand) return;
+        if (!finalFamily) return;
+        onSave({ ...formData, brand: finalBrand, mainFamily: finalFamily });
+      };
+
+      return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-stone-900/60 backdrop-blur-xs p-4 overflow-y-auto">
+          <div className="bg-white border border-stone-200 w-full max-w-2xl max-h-[90vh] flex flex-col shadow-2xl overflow-hidden my-auto">
+            <div className="px-6 py-5 border-b border-stone-200 flex items-center justify-between bg-stone-50">
+              <h3 className="font-serif-brand text-lg text-stone-900">
+                {initialData?.name ? `「${initialData.name}」のスペック編集` : '新しい香水をコレクションに追加'}
+              </h3>
+              <button onClick={onClose} className="text-stone-500 hover:text-stone-900 p-1">
+                <IconX className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="flex border-b border-stone-200 px-6 pt-3 bg-white gap-6 text-xs font-mono uppercase tracking-wider">
+              {['basic', 'pyramid', 'metrics', 'notes'].map((tab, idx) => {
+                const labels = ['1. 基本・写真', '2. ピラミッド調香', '3. 3D特性・シーン', '4. メモ・ボトル'];
+                return (
+                  <button
+                    key={tab}
+                    type="button"
+                    onClick={() => setFormTab(tab)}
+                    className={`pb-3 border-b-2 transition-colors ${formTab === tab ? 'border-stone-900 text-stone-900 font-bold' : 'border-transparent text-stone-500'}`}
+                  >
+                    {labels[idx]}
+                  </button>
+                );
+              })}
+            </div>
+
+            {}
+            <form onSubmit={handleSubmit} className="flex-1 overflow-y-auto p-6 space-y-6 text-sm text-stone-800">
+              {formTab === 'basic' && (
+                <div className="space-y-4">
+                  <div className="space-y-2">
+                    <label className="block text-xs font-mono uppercase text-stone-500">ボトル写真</label>
+                    <div className="flex items-center gap-5">
+                      <div className="w-20 h-24 bg-stone-100 border border-stone-200 overflow-hidden flex items-center justify-center flex-shrink-0 relative group">
+                        {formData.image ? (
+                          <>
+                            <img src={formData.image} alt="" className="w-full h-full object-cover" />
+                            <button
+                              type="button"
+                              onClick={handleClearImage}
+                              className="absolute top-1 right-1 bg-stone-900/80 text-white rounded p-0.5 hover:bg-rose-600 transition-colors"
+                              title="写真を削除"
+                            >
+                              <IconX className="w-3.5 h-3.5" />
+                            </button>
+                          </>
+                        ) : (
+                          <IconDroplets className="w-8 h-8 text-stone-400" />
+                        )}
+                      </div>
+                      <div className="flex-1 space-y-2">
+                        <label className="inline-flex items-center gap-1.5 px-4 py-2 bg-stone-900 text-white text-xs font-medium cursor-pointer uppercase">
+                          <IconUpload className="w-3.5 h-3.5" /> 写真を選択
+                          <input type="file" accept="image/*" onChange={handleImageUpload} className="hidden" />
+                        </label>
+                        <input
+                          type="text"
+                          value={formData.image || ''}
+                          onChange={(e) => setFormData({ ...formData, image: e.target.value })}
+                          placeholder="または画像URLを入力..."
+                          className="w-full px-3 py-1.5 bg-stone-50 border border-stone-200 text-xs focus:outline-none focus:border-stone-900"
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div className="space-y-1">
+                      <label className="block text-xs font-mono uppercase text-stone-500">ブランド (Brand) *</label>
+                      <select
+                        value={selectedBrandOption}
+                        onChange={(e) => setSelectedBrandOption(e.target.value)}
+                        className="w-full px-3 py-2 bg-stone-50 border border-stone-200 text-sm focus:outline-none focus:border-stone-900"
+                      >
+                        <optgroup label="定番・登録ブランド">
+                          {presetBrands.map(b => <option key={b} value={b}>{b}</option>)}
+                        </optgroup>
+                        <option value="__custom__">➕ その他のブランドを直接入力...</option>
+                      </select>
+                      {selectedBrandOption === '__custom__' && (
+                        <input
+                          type="text"
+                          required
+                          value={customBrandInput}
+                          onChange={(e) => setCustomBrandInput(e.target.value)}
+                          placeholder="ブランド名を入力..."
+                          className="w-full px-3 py-2 bg-amber-50/50 border border-amber-300 text-sm mt-1 focus:outline-none focus:border-stone-900"
+                        />
+                      )}
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-mono uppercase text-stone-500 mb-1">香水名 (Name) *</label>
+                      <input
+                        type="text"
+                        required
+                        value={formData.name}
+                        onChange={(e) => setFormData({ ...formData, name: e.target.value })}
+                        placeholder="例: Tam Dao"
+                        className="w-full px-3 py-2 bg-stone-50 border border-stone-200 text-sm focus:outline-none focus:border-stone-900"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-mono uppercase text-stone-500 mb-1">濃度 (賦香率)</label>
+                      <select
+                        value={formData.concentration}
+                        onChange={(e) => setFormData({ ...formData, concentration: e.target.value })}
+                        className="w-full px-3 py-2 bg-stone-50 border border-stone-200 text-sm focus:outline-none focus:border-stone-900"
+                      >
+                        {CONCENTRATIONS.map(c => <option key={c.id} value={c.id}>{c.short} ({c.label})</option>)}
+                      </select>
+                    </div>
+
+                    <div className="space-y-1">
+                      <label className="block text-xs font-mono uppercase text-stone-500">香調ファミリー *</label>
+                      <select
+                        value={selectedFamilyOption}
+                        onChange={(e) => setSelectedFamilyOption(e.target.value)}
+                        className="w-full px-3 py-2 bg-stone-50 border border-stone-200 text-sm focus:outline-none focus:border-stone-900"
+                      >
+                        <optgroup label="定番・登録ファミリー">
+                          {presetFamilies.map(fam => <option key={fam} value={fam}>{fam}</option>)}
+                        </optgroup>
+                        <option value="__custom__">➕ 新しいファミリーを直接入力...</option>
+                      </select>
+                      {selectedFamilyOption === '__custom__' && (
+                        <input
+                          type="text"
+                          required
+                          value={customFamilyInput}
+                          onChange={(e) => setCustomFamilyInput(e.target.value)}
+                          placeholder="ファミリー名を入力 (例: Musky, Tea, Fruity...)"
+                          className="w-full px-3 py-2 bg-amber-50/50 border border-amber-300 text-sm mt-1 focus:outline-none focus:border-stone-900"
+                        />
+                      )}
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-mono uppercase text-stone-500 mb-1">調香師 (Nose)</label>
+                      <input
+                        type="text"
+                        value={formData.perfumer || ''}
+                        onChange={(e) => setFormData({ ...formData, perfumer: e.target.value })}
+                        placeholder="例: Olivia Giacobetti"
+                        className="w-full px-3 py-2 bg-stone-50 border border-stone-200 text-sm focus:outline-none focus:border-stone-900"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-mono uppercase text-stone-500 mb-1">発売年</label>
+                      <input
+                        type="number"
+                        value={formData.releaseYear || ''}
+                        onChange={(e) => setFormData({ ...formData, releaseYear: e.target.value })}
+                        placeholder="例: 2013"
+                        className="w-full px-3 py-2 bg-stone-50 border border-stone-200 text-sm focus:outline-none focus:border-stone-900"
+                      />
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {}
+              {formTab === 'pyramid' && (
+                <div className="space-y-4">
+                  {/* Top */}
+                  <div className="p-3.5 bg-amber-50/40 border border-amber-200 space-y-2">
+                    <span className="text-xs font-mono font-bold text-amber-900">1. Top Notes / トップノート（第一印象）</span>
+                    <div className="flex flex-wrap gap-1.5">
+                      {(formData.pyramid?.top || []).map((note, i) => (
+                        <span key={i} className="inline-flex items-center gap-1 px-3 py-1 bg-white text-xs border border-amber-200">
+                          {note}
+                          <button type="button" onClick={() => removeNote('top', i)} className="text-stone-400 hover:text-rose-600"><IconX className="w-3 h-3" /></button>
+                        </span>
+                      ))}
+                    </div>
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        value={tempTop}
+                        onChange={(e) => setTempTop(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            addNote('top', tempTop, setTempTop);
+                          }
+                        }}
+                        placeholder="ノート名を入力してEnterで追加..."
+                        className="flex-1 px-3 py-1 bg-white border border-stone-300 text-xs focus:outline-none focus:border-stone-900"
+                      />
+                      <button type="button" onClick={() => addNote('top', tempTop, setTempTop)} className="px-3 py-1 bg-stone-900 text-white text-xs">追加</button>
+                    </div>
+                  </div>
+
+                  {/* Middle */}
+                  <div className="p-3.5 bg-stone-50 border border-stone-200 space-y-2">
+                    <span className="text-xs font-mono font-bold text-stone-900">2. Heart & Middle Notes / ミドルノート（主役）</span>
+                    <div className="flex flex-wrap gap-1.5">
+                      {(formData.pyramid?.middle || []).map((note, i) => (
+                        <span key={i} className="inline-flex items-center gap-1 px-3 py-1 bg-white text-xs border border-stone-300">
+                          {note}
+                          <button type="button" onClick={() => removeNote('middle', i)} className="text-stone-400 hover:text-rose-600"><IconX className="w-3 h-3" /></button>
+                        </span>
+                      ))}
+                    </div>
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        value={tempMid}
+                        onChange={(e) => setTempMid(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            addNote('middle', tempMid, setTempMid);
+                          }
+                        }}
+                        placeholder="ノート名を入力してEnterで追加..."
+                        className="flex-1 px-3 py-1 bg-white border border-stone-300 text-xs focus:outline-none focus:border-stone-900"
+                      />
+                      <button type="button" onClick={() => addNote('middle', tempMid, setTempMid)} className="px-3 py-1 bg-stone-900 text-white text-xs">追加</button>
+                    </div>
+                  </div>
+
+                  {/* Base */}
+                  <div className="p-3.5 bg-stone-100 border-2 border-stone-900 space-y-2">
+                    <span className="text-xs font-mono font-bold text-stone-900">3. Base & Last Notes / ラストノート（余韻）</span>
+                    <div className="flex flex-wrap gap-1.5">
+                      {(formData.pyramid?.base || []).map((note, i) => (
+                        <span key={i} className="inline-flex items-center gap-1 px-3 py-1 bg-white text-xs border border-stone-300">
+                          {note}
+                          <button type="button" onClick={() => removeNote('base', i)} className="text-stone-400 hover:text-rose-600"><IconX className="w-3 h-3" /></button>
+                        </span>
+                      ))}
+                    </div>
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        value={tempBase}
+                        onChange={(e) => setTempBase(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            addNote('base', tempBase, setTempBase);
+                          }
+                        }}
+                        placeholder="ノート名を入力してEnterで追加..."
+                        className="flex-1 px-3 py-1 bg-white border border-stone-300 text-xs focus:outline-none focus:border-stone-900"
+                      />
+                      <button type="button" onClick={() => addNote('base', tempBase, setTempBase)} className="px-3 py-1 bg-stone-900 text-white text-xs">追加</button>
+                    </div>
+                  </div>
+
+                  {/* 主要アコード */}
+                  <div className="p-3.5 bg-white border border-stone-200 space-y-2">
+                    <span className="text-xs font-mono font-bold text-stone-600 uppercase">主要アコード (Accords)</span>
+                    <div className="flex flex-wrap gap-1.5">
+                      {(formData.accords || []).map((a, i) => (
+                        <span key={i} className="inline-flex items-center gap-1 px-2.5 py-1 bg-stone-100 text-stone-800 text-xs border border-stone-200">
+                          #{a}
+                          <button type="button" onClick={() => removeAccord(i)} className="text-stone-400 hover:text-rose-600"><IconX className="w-3 h-3" /></button>
+                        </span>
+                      ))}
+                    </div>
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        value={tempAccord}
+                        onChange={(e) => setTempAccord(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') {
+                            e.preventDefault();
+                            addAccord();
+                          }
+                        }}
+                        placeholder="例: スモーキー, パウダリー (Enterで追加)"
+                        className="flex-1 px-3 py-1 bg-stone-50 border border-stone-300 text-xs focus:outline-none focus:border-stone-900"
+                      />
+                      <button type="button" onClick={addAccord} className="px-3 py-1 bg-stone-900 text-white text-xs">追加</button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {}
+              {formTab === 'metrics' && (
+                <div className="space-y-4">
+                  <div className="p-3.5 bg-stone-50 border border-stone-200 space-y-1">
+                    <div className="flex justify-between text-xs font-mono">
+                      <span>X軸: 重厚感</span>
+                      <span>{formData.metrics.heaviness} / 5.0</span>
+                    </div>
+                    <input
+                      type="range" min="1" max="5" step="0.1"
+                      value={formData.metrics.heaviness}
+                      onChange={(e) => setFormData({ ...formData, metrics: { ...formData.metrics, heaviness: parseFloat(e.target.value) } })}
+                      className="w-full accent-stone-900"
+                    />
+                  </div>
+
+                  <div className="p-3.5 bg-stone-50 border border-stone-200 space-y-1">
+                    <div className="flex justify-between text-xs font-mono">
+                      <span>Y軸: 爽快 ↔ 甘口</span>
+                      <span>{formData.metrics.sweetness} / 5.0</span>
+                    </div>
+                    <input
+                      type="range" min="1" max="5" step="0.1"
+                      value={formData.metrics.sweetness}
+                      onChange={(e) => setFormData({ ...formData, metrics: { ...formData.metrics, sweetness: parseFloat(e.target.value) } })}
+                      className="w-full accent-amber-600"
+                    />
+                  </div>
+
+                  <div className="p-3.5 bg-stone-50 border border-stone-200 space-y-1">
+                    <div className="flex justify-between text-xs font-mono">
+                      <span>Z軸: 万人 ↔ 個性</span>
+                      <span>{formData.metrics.uniqueness} / 5.0</span>
+                    </div>
+                    <input
+                      type="range" min="1" max="5" step="0.1"
+                      value={formData.metrics.uniqueness}
+                      onChange={(e) => setFormData({ ...formData, metrics: { ...formData.metrics, uniqueness: parseFloat(e.target.value) } })}
+                      className="w-full accent-indigo-600"
+                    />
+                  </div>
+
+                  <div className="space-y-1.5 pt-2">
+                    <label className="block text-xs font-mono uppercase text-stone-500">適した季節</label>
+                    <div className="flex gap-2">
+                      {SEASONS.map(s => {
+                        const active = (formData.seasons || []).includes(s.id);
+                        return (
+                          <button
+                            key={s.id}
+                            type="button"
+                            onClick={() => toggleSeason(s.id)}
+                            className={`flex-1 py-2 border text-xs font-medium ${active ? 'bg-stone-900 text-white border-stone-900' : 'bg-white text-stone-500 border-stone-300'}`}
+                          >
+                            {s.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {}
+              {formTab === 'notes' && (
+                <div className="space-y-4">
+                  <div>
+                    <label className="block text-xs font-mono uppercase text-stone-500 mb-1">お気に入り度 (★ {formData.rating})</label>
+                    <input
+                      type="range" min="1" max="5" step="0.5"
+                      value={formData.rating}
+                      onChange={(e) => setFormData({ ...formData, rating: parseFloat(e.target.value) })}
+                      className="w-full accent-stone-900"
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-xs font-mono uppercase text-stone-500 mb-1">ボトル全容量 (ml)</label>
+                      <input
+                        type="number"
+                        value={formData.bottleSize || 50}
+                        onChange={(e) => setFormData({ ...formData, bottleSize: parseInt(e.target.value) || 0 })}
+                        className="w-full px-3 py-1.5 bg-stone-50 border border-stone-300 text-xs"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-mono uppercase text-stone-500 mb-1">現在の残量 (ml)</label>
+                      <input
+                        type="number"
+                        value={formData.remainingAmount || 0}
+                        onChange={(e) => setFormData({ ...formData, remainingAmount: parseInt(e.target.value) || 0 })}
+                        className="w-full px-3 py-1.5 bg-stone-50 border border-stone-300 text-xs"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-mono uppercase text-stone-500 mb-1">参考価格 (円)</label>
+                    <input
+                      type="text"
+                      value={formData.price || ''}
+                      onChange={(e) => setFormData({ ...formData, price: e.target.value })}
+                      placeholder="例: 28,000"
+                      className="w-full px-3 py-1.5 bg-stone-50 border border-stone-300 text-xs"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-mono uppercase text-stone-500 mb-1">公式説明 / ストーリー</label>
+                    <textarea
+                      rows="2"
+                      value={formData.description || ''}
+                      onChange={(e) => setFormData({ ...formData, description: e.target.value })}
+                      placeholder="ストーリー..."
+                      className="w-full px-3 py-1.5 bg-stone-50 border border-stone-300 text-xs"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-mono uppercase text-stone-500 mb-1">個人的なメモ</label>
+                    <textarea
+                      rows="2"
+                      value={formData.memo || ''}
+                      onChange={(e) => setFormData({ ...formData, memo: e.target.value })}
+                      placeholder="香りの印象や使用シーン..."
+                      className="w-full px-3 py-1.5 bg-stone-50 border border-stone-300 text-xs"
+                    />
+                  </div>
+                </div>
+              )}
+
+              <div className="pt-4 border-t border-stone-200 flex justify-end gap-3">
+                <button type="button" onClick={onClose} className="px-4 py-2 border border-stone-300 text-xs">キャンセル</button>
+                <button type="submit" className="px-5 py-2 bg-stone-900 text-white text-xs font-bold shadow-sm">保存する</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.render(<App />, document.getElementById('root'));
+  </script>
+</body>
+</html>
